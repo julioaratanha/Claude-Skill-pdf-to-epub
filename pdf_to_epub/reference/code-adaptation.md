@@ -329,7 +329,7 @@ python -m pytest tests/conversion/test_structure_classifier.py -v
 
 3. Test on real PDF:
 ```bash
-python -m scripts.convert input.pdf output.epub
+python -m scripts.convert input.pdf -o output.epub
 python -m scripts.validate input.pdf output.epub
 ```
 

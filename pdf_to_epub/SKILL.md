@@ -16,7 +16,7 @@ Convert PDF documents to high-quality EPUB files with automatic chapter detectio
 
 ```bash
 # Run conversion (from skill directory)
-python -m scripts.convert input.pdf output.epub
+python -m scripts.convert input.pdf -o output.epub
 
 # Validate result
 python -m scripts.validate input.pdf output.epub
@@ -305,7 +305,7 @@ For detailed information, see:
 
 ```bash
 # Full conversion with validation (from skill directory)
-python -m scripts.convert input.pdf output.epub && \
+python -m scripts.convert input.pdf -o output.epub && \
 python -m scripts.validate input.pdf output.epub
 
 # Analyze PDF structure

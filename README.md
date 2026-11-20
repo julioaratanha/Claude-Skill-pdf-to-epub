@@ -24,6 +24,8 @@ cp -r pdf_to_epub ~/.claude/skills/pdf-to-epub
 cp -r pdf_to_epub /path/to/project/.claude/skills/pdf-to-epub
 ```
 
+Inside this repository nothing needs to be copied: `.claude/skills/pdf-to-epub` is a symlink to `pdf_to_epub/`, so Claude Code loads the skill automatically when opened here.
+
 ### Python Dependencies
 
 ```bash
@@ -40,7 +42,7 @@ Or run manually:
 
 ```bash
 cd pdf_to_epub
-python -m scripts.convert input.pdf output.epub
+python -m scripts.convert input.pdf -o output.epub
 python -m scripts.validate input.pdf output.epub
 ```
 
