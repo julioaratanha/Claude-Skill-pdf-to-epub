@@ -744,3 +744,14 @@ When changing StructuredContent:
 1. Update `content_factory.py` helper
 2. Update serialization tests
 3. Check all integration tests still pass
+
+## Layout Cleanup Tests (2026-11)
+
+`tests/conversion/test_layout_cleanup.py` — 23 tests covering page selection
+(`skip`/`content`/`endnotes` incl. negative indices, `from_dict` with new fields),
+full-page and vector-cluster rasterization on a synthetic PDF, drop-cap repair
+(joined/spaced, cross-page guard, trailing cap after styled or recurring label,
+"Apêndice A" negative case), dehyphenation (compounds, suspended hyphens),
+margin-only noise filtering, endnote opt-out and proximity-based heading merge.
+Full suite: 274 passed. Gap: no fixture PDF with outlined text/drop caps is
+committed (the motivating document is not redistributable).

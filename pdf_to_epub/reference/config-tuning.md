@@ -39,16 +39,19 @@ Controls which pages to process.
 class PageRanges:
     skip: List[int] = field(default_factory=list)
     content: Tuple[int, int] = (1, -1)
-    endnotes: Optional[Tuple[int, int]] = None
+    endnotes: Optional[Tuple[int, int]] = (-1, -1)
 ```
 
 ### Parameters
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `skip` | List[int] | `[]` | Page numbers to skip entirely (1-indexed) |
+| `skip` | List[int] | `[]` | Page numbers to skip entirely (1-indexed, negative = from end) |
 | `content` | Tuple[int, int] | `(1, -1)` | Start and end pages for main content. Negative = from end. |
-| `endnotes` | Tuple[int, int] or None | `None` | Page range for endnotes section |
+| `endnotes` | Tuple[int, int] or None | `(-1, -1)` | Endnote pages (kept even if outside `content`; notes are auto-detected). **`null`/`None` disables endnote detection and linking** — use it for documents without notes, where numbered lists (`1  Proposal…`) would otherwise be turned into a fake "Endnotes" chapter. |
+
+`skip` and `content` are applied to both text and images. A skipped printed table
+of contents is usually desirable: the EPUB generates its own navigable TOC.
 
 ### Examples
 
@@ -66,6 +69,38 @@ PageRanges(content=(1, -1))
 # Skip specific pages (index, ads, etc.)
 PageRanges(skip=[1, 2, 50, 51, 100])
 ```
+
+---
+
+## Rasterization (covers, outlined text, infographics)
+
+```python
+ConversionConfig(
+    ...,
+    rasterize_pages=[1, -1],          # render whole pages as one image
+    rasterize_vector_graphics=True,   # render dense vector-drawing clusters as images
+)
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `rasterize_pages` | List[int] | `[]` | Pages (negative = from end) rendered as a single full-page image instead of their extracted image fragments. Use for covers built from many layers. Text on those pages is still extracted. |
+| `rasterize_vector_graphics` | bool | `false` | Detect clusters of 20+ vector paths (text converted to outlines, callout boxes, charts) and render each as an image. Text blocks inside a rendered region are dropped to avoid duplicates. |
+
+**When to use:** `analyze` shows a page with many small images (cover = fragments), or
+visible content (numbers in boxes, chart labels) is missing from the EPUB because
+`page.get_text()` does not contain it.
+
+### Automatic cleanups (no config)
+
+- **Drop caps** extracted as a separate letter (`"E"` + `"sse capítulo"`) are re-attached;
+  whether a space is inserted is decided from the document's own vocabulary.
+- **Line-break hyphenation** (`"territóri- os"`) is joined, keeping compounds that appear
+  hyphenated elsewhere (`"pré-campanha"`) and suspended hyphens (`"first- and second-"`).
+- **Recurring section labels** in the body ("THE PROBLEM" on every chapter) are no
+  longer removed as running headers: only repeated lines found in the top/bottom 10%
+  of the page are treated as header/footer noise.
+- Same-level heading lines are merged only when vertically adjacent (≤ 2 lines apart).
 
 ---
 

@@ -223,7 +223,7 @@ class TestSimpleStrategyDetectStructure:
         # Verify pipeline
         mock_analyzer.analyze.assert_called_once_with(blocks)
         mock_classifier.classify.assert_called_once_with(blocks)
-        mock_builder.build_chapters.assert_called_once_with(mock_classified)
+        mock_builder.build_chapters.assert_called_once_with(mock_classified, detect_endnotes=True)
         
         assert isinstance(result, StructuredContent)
         assert len(result.chapters) == 1

@@ -32,7 +32,9 @@ STRATEGY_REGISTRY = {
 
 # Default configuration
 DEFAULT_CONFIG = ConversionConfig(
-    page_ranges=PageRanges(skip=[1, 2], content=(3, -3), endnotes=(-2, -1)),
+    # All pages, endnotes auto-detected. page_ranges is applied by the strategy,
+    # so pages are only dropped when a config asks for it explicitly.
+    page_ranges=PageRanges(),
     exclude_regions=ExcludeRegions(top=0.05, bottom=0.05, left=0.0, right=0.0),
     multi_column=MultiColumnConfig(enabled=False, column_count=1, threshold=0.4),
     reading_order_strategy="y_sort",

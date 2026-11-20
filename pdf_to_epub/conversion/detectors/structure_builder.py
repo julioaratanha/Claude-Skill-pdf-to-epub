@@ -90,14 +90,21 @@ class StructureBuilder:
     Converts a flat list of SemanticBlocks into a hierarchical Chapter tree.
     """
 
-    def build_chapters(self, blocks: List[SemanticBlock]) -> List[Chapter]:
+    def build_chapters(self, blocks: List[SemanticBlock], detect_endnotes: bool = True) -> List[Chapter]:
         # 0. Separate endnotes from main content (and merge multi-block notes).
         main_blocks: List[SemanticBlock] = []
         endnote_blocks: List[SemanticBlock] = []
         endnotes_heading = None
 
-        endnotes_heading_index = self._find_endnotes_heading_index(blocks)
-        if endnotes_heading_index is not None:
+        endnotes_heading_index = self._find_endnotes_heading_index(blocks) if detect_endnotes else None
+        if not detect_endnotes:
+            # Document has no notes: "1  text" blocks are numbered list items.
+            for block in blocks:
+                if block.role == "endnote":
+                    block.role = "body"
+                block.endnote_num = None
+            main_blocks = list(blocks)
+        elif endnotes_heading_index is not None:
             endnotes_heading = blocks[endnotes_heading_index].original_block.text.strip()
             main_blocks = list(blocks[:endnotes_heading_index])
             endnotes_section = list(blocks[endnotes_heading_index + 1:])
@@ -357,21 +364,25 @@ class StructureBuilder:
             
         merged = []
         current_header = None
+        last_merged = None  # last physical block folded into current_header
         
         for block in blocks:
             is_header = block.role.startswith("h") and block.role[1:].isdigit()
             
             if is_header:
-                if current_header and current_header.role == block.role:
+                if (current_header and current_header.role == block.role
+                        and self._is_vertically_adjacent(last_merged, block.original_block)):
                     # Merge logic: Append text to previous header block
                     # We modify the original_block text for simplicity, or create a new wrapper
                     # Here we destructively update the current_header's text representation
                     current_header.original_block.text += " " + block.original_block.text
+                    last_merged = block.original_block
                     # We skip appending this block to 'merged' list efficiently
                     continue
                 else:
                     # New header (or different level)
                     current_header = block
+                    last_merged = block.original_block
                     merged.append(block)
             else:
                 # Not a header (body, etc) -> interrupts merging sequence
@@ -379,3 +390,20 @@ class StructureBuilder:
                 merged.append(block)
                 
         return merged
+
+    @staticmethod
+    def _is_vertically_adjacent(prev, curr) -> bool:
+        """
+        Multi-line headings sit close together; recurring section labels spread
+        down the page (separated by figures or boxes) must stay separate headings.
+        """
+        if prev is None or curr is None:
+            return True
+        try:
+            if prev.page != curr.page:
+                return True  # heading split across a page break: keep legacy merge
+            gap = float(curr.y0) - float(prev.y1)
+            line = max(float(prev.font_size), float(curr.font_size), 1.0)
+        except (TypeError, ValueError, AttributeError):
+            return True
+        return gap <= line * 2.0

@@ -11,7 +11,9 @@ class PageRanges:
     """Page ranges configuration."""
     skip: List[int] = field(default_factory=list)
     content: Tuple[int, int] = (1, -1)
-    endnotes: Tuple[int, int] = (-1, -1)
+    # None explicitly disables endnote detection (for documents without notes,
+    # where numbered lists would otherwise be mistaken for an endnotes section).
+    endnotes: Optional[Tuple[int, int]] = (-1, -1)
 
 
 @dataclass
@@ -338,6 +340,12 @@ class ConversionConfig:
     footnote_processing: FootnoteConfig
     metadata: BookMetadata
     image_optimization: ImageOptimizationConfig = field(default_factory=ImageOptimizationConfig)
+    # Pages (1-indexed, negative = from end) rendered as one full-page image
+    # instead of their extracted image fragments, e.g. covers built from layers.
+    rasterize_pages: List[int] = field(default_factory=list)
+    # Render dense clusters of vector drawings (outlined text, infographics)
+    # as images; otherwise their content is invisible to text extraction.
+    rasterize_vector_graphics: bool = False
     
     def __post_init__(self):
         """Validate configuration."""

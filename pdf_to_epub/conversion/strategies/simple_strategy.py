@@ -5,6 +5,7 @@
 from pathlib import Path
 from typing import List, Tuple, Dict
 import re
+from collections import Counter
 import fitz  # PyMuPDF
 
 from .base_strategy import BaseStrategy
@@ -49,10 +50,30 @@ class SimpleStrategy(BaseStrategy):
         """
         # Step 1: Extract text blocks using PDFExtractor
         with PDFExtractor(pdf_path) as extractor:
+            self._keep_margin_noise_only(extractor)
             blocks = extractor.get_structural_blocks()
 
         # Step 2: Extract images from PDF
         images = self._extract_images(pdf_path)
+
+        # Step 2b: Apply page_ranges (skip / content) and full-page rasterization
+        if self._has_page_selection(config):
+            doc = fitz.open(str(pdf_path))
+            try:
+                page_count = doc.page_count
+                kept_pages = self._resolve_kept_pages(config, page_count)
+                raster_pages = {
+                    self._resolve_page(int(n), page_count) for n in self._rasterize_list(config)
+                } & kept_pages
+                blocks = [b for b in blocks if b.page in kept_pages]
+                images = [img for img in images if img.page_num in kept_pages and img.page_num not in raster_pages]
+                images.extend(self._render_pages(doc, sorted(raster_pages)))
+                if getattr(config, "rasterize_vector_graphics", False) is True:
+                    vector_images = self._render_vector_regions(doc, sorted(kept_pages - raster_pages))
+                    blocks = [b for b in blocks if not self._inside_any(b, vector_images)]
+                    images.extend(vector_images)
+            finally:
+                doc.close()
 
         # Step 3: Optimize images if enabled
         if hasattr(config, 'image_optimization') and config.image_optimization.enabled:
@@ -62,7 +83,157 @@ class SimpleStrategy(BaseStrategy):
         metadata = self._extract_metadata(pdf_path, config)
 
         return blocks, images, metadata
-    
+
+    @staticmethod
+    def _rasterize_list(config) -> List[int]:
+        pages = getattr(config, "rasterize_pages", None)
+        return list(pages) if isinstance(pages, (list, tuple)) else []
+
+    def _has_page_selection(self, config) -> bool:
+        """True when config restricts pages or asks for rasterized pages."""
+        page_ranges = getattr(config, "page_ranges", None)
+        skip = getattr(page_ranges, "skip", None)
+        content = getattr(page_ranges, "content", None)
+        restricts = (isinstance(skip, (list, tuple)) and len(skip) > 0) or (
+            isinstance(content, (list, tuple)) and tuple(content) != (1, -1)
+        )
+        vectors = getattr(config, "rasterize_vector_graphics", False) is True
+        return restricts or vectors or bool(self._rasterize_list(config))
+
+    @staticmethod
+    def _keep_margin_noise_only(extractor) -> None:
+        """
+        Drop repeated-line noise patterns that do not sit in the page margins.
+
+        The extractor treats any line repeated on >20% of pages as noise. That is
+        right for running headers/footers, but it also erases recurring section
+        labels in the body (e.g. "THE PROBLEM", "OUR PROPOSALS" on every chapter).
+        """
+        patterns = getattr(extractor, "noise_patterns", None)
+        doc = getattr(extractor, "doc", None)
+        if not isinstance(patterns, list) or not patterns or doc is None:
+            return
+        try:
+            pages = list(doc)[:100]
+        except TypeError:
+            return
+
+        total = [0] * len(patterns)
+        in_margin = [0] * len(patterns)
+        for page in pages:
+            height = page.rect.height
+            for block in page.get_text("dict").get("blocks", []):
+                if block.get("type") != 0:
+                    continue
+                for line in block.get("lines", []):
+                    text = "".join(span.get("text", "") for span in line.get("spans", [])).strip()
+                    if not text:
+                        continue
+                    _, y0, _, y1 = line.get("bbox", (0, 0, 0, 0))
+                    for i, pattern in enumerate(patterns):
+                        if pattern.search(text):
+                            total[i] += 1
+                            if y1 <= height * 0.1 or y0 >= height * 0.9:
+                                in_margin[i] += 1
+
+        extractor.noise_patterns = [
+            p for i, p in enumerate(patterns) if total[i] == 0 or in_margin[i] * 2 >= total[i]
+        ]
+
+    def _render_vector_regions(
+        self, doc, pages: List[int], min_paths: int = 20, gap: float = 12.0
+    ) -> List[ImageResource]:
+        """
+        Render dense clusters of vector drawings (text converted to outlines,
+        charts, infographic boxes) as images, since they carry no extractable text.
+        """
+        rendered: List[ImageResource] = []
+        for page_num in pages:
+            page = doc[page_num - 1]
+            width, height = page.rect.width, page.rect.height
+            rects = sorted(
+                (d["rect"] for d in page.get_drawings()
+                 if d["rect"].height < height * 0.9 and d["rect"].width < width * 0.95),
+                key=lambda r: r.y0,
+            )
+            clusters: List[list] = []  # [rect, path_count]
+            for rect in rects:
+                if clusters and rect.y0 <= clusters[-1][0].y1 + gap:
+                    clusters[-1][0] |= rect
+                    clusters[-1][1] += 1
+                else:
+                    clusters.append([fitz.Rect(rect), 1])
+
+            for idx, (rect, count) in enumerate(c for c in clusters if c[1] >= min_paths and c[0].height >= 15):
+                clip = (rect + (-2, -2, 2, 2)) & page.rect
+                pix = page.get_pixmap(dpi=200, clip=clip)
+                rendered.append(ImageResource(
+                    id=f"img-page-{page_num}-vector-{idx + 1}",
+                    filename=f"page{page_num:03d}-vector{idx + 1}.png",
+                    data=pix.tobytes("png"),
+                    format="png",
+                    width=pix.width,
+                    height=pix.height,
+                    page_num=page_num,
+                    bbox=(clip.x0, clip.y0, clip.x1, clip.y1),
+                ))
+        return rendered
+
+    @staticmethod
+    def _inside_any(block: TextBlock, images: List[ImageResource]) -> bool:
+        """True if the block's centre lies inside a rendered region (avoid duplicates)."""
+        cx, cy = (block.x0 + block.x1) / 2, (block.y0 + block.y1) / 2
+        for img in images:
+            if img.page_num == block.page and img.bbox:
+                x0, y0, x1, y1 = img.bbox
+                if x0 <= cx <= x1 and y0 <= cy <= y1:
+                    return True
+        return False
+
+    @staticmethod
+    def _resolve_page(page: int, page_count: int) -> int:
+        """Convert a 1-indexed page number (negative = from end) to 1-indexed."""
+        return page if page > 0 else page_count + 1 + page
+
+    def _resolve_kept_pages(self, config, page_count: int) -> set[int]:
+        """Pages left after applying page_ranges.content and page_ranges.skip."""
+        all_pages = set(range(1, page_count + 1))
+        page_ranges = getattr(config, "page_ranges", None)
+        content = getattr(page_ranges, "content", None) or (1, -1)
+        skip_list = getattr(page_ranges, "skip", None) or []
+        if not isinstance(content, (tuple, list)) or not isinstance(skip_list, (tuple, list)):
+            return all_pages  # loosely-typed config (e.g. test doubles): keep everything
+        start = max(1, self._resolve_page(int(content[0]), page_count))
+        end = min(page_count, self._resolve_page(int(content[1]), page_count))
+        kept = set(range(start, end + 1))
+        endnotes = getattr(page_ranges, "endnotes", None)
+        if isinstance(endnotes, (tuple, list)) and len(endnotes) == 2:
+            # Endnote pages usually sit outside the main content range.
+            note_start = max(1, self._resolve_page(int(endnotes[0]), page_count))
+            note_end = min(page_count, self._resolve_page(int(endnotes[1]), page_count))
+            kept.update(range(note_start, note_end + 1))
+        skip = {self._resolve_page(int(p), page_count) for p in skip_list}
+        return kept - skip
+
+    def _render_pages(self, doc, pages: List[int]) -> List[ImageResource]:
+        """Render whole pages to JPEG (used for covers assembled from many layers)."""
+        rendered: List[ImageResource] = []
+        for page_num in pages:
+            page = doc[page_num - 1]
+            pix = page.get_pixmap(dpi=150)
+            rect = page.rect
+            rendered.append(ImageResource(
+                id=f"img-page-{page_num}-render",
+                filename=f"page{page_num:03d}.jpeg",
+                data=pix.tobytes("jpeg"),
+                format="jpeg",
+                width=pix.width,
+                height=pix.height,
+                page_num=page_num,
+                bbox=(0.0, 0.0, rect.width, rect.height),
+            ))
+        return rendered
+
     def _extract_images(self, pdf_path: Path) -> List[ImageResource]:
         """
         Extract all images from PDF pages.
@@ -245,11 +416,102 @@ class SimpleStrategy(BaseStrategy):
             sorter = YSorter()
         ordered_blocks = sorter.sort_blocks(blocks)
         ordered_blocks = self._reorder_side_blocks(ordered_blocks)
-        
+        ordered_blocks = self._clean_text(ordered_blocks)
+
         # Y-sort is deterministic, so confidence is always 1.0
         confidence = 1.0
         
         return ordered_blocks, confidence
+
+    # Letters incl. accented ones; hyphenated compounds kept as one token.
+    _WORD_RE = re.compile(r"[^\W\d_]+(?:-[^\W\d_]+)*")
+    # Line-break hyphenation left by the extractor: "territóri- os".
+    _BROKEN_WORD_RE = re.compile(r"([^\W\d_]+)-\s+([^\W\d_A-Z][^\W\d_]*)")
+    # Drop cap glued to the end of the preceding short line: "... Renan Santos O".
+    _TRAILING_DROP_CAP_RE = re.compile(r"^(.{1,60}?[^\s.:;!?])\s+([A-ZÀ-Ý])$")
+    # Suspended hyphens ("first- and second-person") must stay as they are.
+    _SUSPENDED_HYPHEN_WORDS = frozenset({"and", "or", "nor", "e", "ou", "y", "und", "oder", "et"})
+
+    def _clean_text(self, blocks: List[TextBlock]) -> List[TextBlock]:
+        """
+        Repair typographic artifacts using the document's own vocabulary:
+        - drop caps extracted as a separate one-letter block ("E" + "sse capítulo")
+        - words hyphenated at line breaks ("territóri- os" -> "territórios")
+        """
+        if not blocks:
+            return blocks
+
+        self._vocab: Counter[str] = Counter()
+        for block in blocks:
+            for token in self._WORD_RE.findall(block.text):
+                self._vocab[token.lower()] += 1
+                if "-" in token:
+                    self._vocab.update(part.lower() for part in token.split("-"))
+        block_texts = Counter(block.text.strip() for block in blocks)
+
+        cleaned: List[TextBlock] = []
+        pending_cap: str | None = None
+        for i, block in enumerate(blocks):
+            text = block.text.strip()
+            nxt = blocks[i + 1] if i + 1 < len(blocks) else None
+            next_text = nxt.text.strip() if nxt else ""
+            next_starts_word = (
+                nxt is not None and bool(next_text) and next_text[0].isalpha() and nxt.page == block.page
+            )
+
+            if len(text) == 1 and text.isalpha() and text.isupper() and next_starts_word and len(next_text) > 40:
+                pending_cap = text  # standalone drop cap: attach to next block
+                continue
+
+            match = self._TRAILING_DROP_CAP_RE.match(text)
+            different_style = nxt is not None and (
+                nxt.font_name != block.font_name or abs(nxt.font_size - block.font_size) > 0.5
+            )
+            # Lowercase continuation ("... Renan Santos O" + "futuro é"), or a
+            # recurring label that also appears on its own elsewhere
+            # ("O PROBLEMA O" + "Sistema Único", while "O PROBLEMA" recurs).
+            continues = next_starts_word and (
+                next_text[0].islower() or (match is not None and block_texts[match.group(1)] > 0)
+            )
+            if match and continues and different_style:
+                # Short line in another style ending in a lone capital: a drop cap.
+                block.text = match.group(1)
+                cleaned.append(block)
+                pending_cap = match.group(2)
+                continue
+
+            if pending_cap:
+                block.text = self._attach_drop_cap(pending_cap, text)
+                pending_cap = None
+
+            block.text = self.dehyphenate(block.text)
+            cleaned.append(block)
+
+        return cleaned
+
+    def _attach_drop_cap(self, cap: str, text: str) -> str:
+        first_word = self._WORD_RE.match(text)
+        word = first_word.group(0).split("-")[0].lower() if first_word else ""
+        vocab = getattr(self, "_vocab", Counter())
+        # "E"+"sse" -> "Esse" (joined form is a known word; the fragment only
+        # occurs here); "O"+"governo" -> "O governo".
+        if word and vocab[(cap + word).lower()] > 0 and vocab[word] <= 1:
+            return cap + text
+        return f"{cap} {text}"
+
+    def dehyphenate(self, text: str) -> str:
+        """Join words split by line-break hyphenation, keeping real compounds."""
+        vocab = getattr(self, "_vocab", Counter())
+
+        def join(match):
+            left, right = match.group(1), match.group(2)
+            if right.lower() in self._SUSPENDED_HYPHEN_WORDS:
+                return match.group(0)  # "first- and second-person", "pré- e pós-"
+            if vocab[f"{left}-{right}".lower()] > 0:
+                return f"{left}-{right}"  # compound seen elsewhere, e.g. "pré-campanha"
+            return left + right
+
+        return self._BROKEN_WORD_RE.sub(join, text)
 
     def _reorder_side_blocks(self, blocks: List[TextBlock]) -> List[TextBlock]:
         """
@@ -330,7 +592,9 @@ class SimpleStrategy(BaseStrategy):
         
         # Step 3: Group into chapters
         builder = StructureBuilder()
-        chapters = builder.build_chapters(classified_blocks)
+        page_ranges = getattr(config, "page_ranges", None)
+        detect_endnotes = not (page_ranges is not None and getattr(page_ranges, "endnotes", ()) is None)
+        chapters = builder.build_chapters(classified_blocks, detect_endnotes=detect_endnotes)
         
         # Handle case where no chapters were detected
         if not chapters:
@@ -531,7 +795,8 @@ class SimpleStrategy(BaseStrategy):
             nonlocal current_paragraph
             if not current_paragraph:
                 return
-            escaped = self._escape_html(current_paragraph.strip())
+            # Paragraphs joined across blocks can carry "word- next" splits too.
+            escaped = self._escape_html(self.dehyphenate(current_paragraph.strip()))
             escaped = self._link_figure_refs(escaped, image_by_index, chapter_file_index)
             if detector:
                 escaped = detector.convert_to_hyperlinks(escaped, endnotes_filename)

@@ -520,6 +520,27 @@ export pdf_to_epub_DEBUG=1
 4. **Footnote Processing:** Config has flag, but SimpleStrategy does not link footnotes to references
 5. **Image Positioning:** Images are extracted but original page positions may not be preserved in EPUB layout
 
+## Layout Cleanup Additions (2026-11)
+
+Driven by a magazine-style government plan (InDesign PDF: drop caps, callout boxes
+with text converted to outlines, recurring section labels, numbered proposals):
+
+| Problem | Fix | Where |
+|---------|-----|-------|
+| `page_ranges` ignored by the pipeline | `skip`/`content` applied to blocks and images; endnote pages always kept; `DEFAULT_CONFIG` now `PageRanges()` (all pages — matching its previous effective behaviour) | `SimpleStrategy.extract`, `converter.py` |
+| Numbered lists turned into a fake Endnotes chapter, swallowing 23 pages | `page_ranges.endnotes: null` disables endnote detection | `StructureBuilder.build_chapters(detect_endnotes=...)` |
+| Recurring body labels erased as "noise" | noise patterns kept only if found in page margins | `SimpleStrategy._keep_margin_noise_only` |
+| Outlined text / infographics invisible | `rasterize_vector_graphics` renders path clusters | `SimpleStrategy._render_vector_regions` |
+| Cover split into 8 image fragments | `rasterize_pages` | `SimpleStrategy._render_pages` |
+| Drop caps detached; hyphenated words split | vocabulary-based repair after ordering | `SimpleStrategy._clean_text`, `dehyphenate` |
+| Distant same-level labels merged into one heading | merge only vertically adjacent lines | `StructureBuilder._is_vertically_adjacent` |
+
+Note: on documents with recurring labels the validator's order score under-reports
+(repeated segments match their first occurrence); an independent shingle/LIS check
+on the source document gave 98% while the validator reported ~74%.
+
+Tests: `tests/conversion/test_layout_cleanup.py`.
+
 ## Future Enhancements
 
 ### Enhancement 1: AcademicStrategy
